@@ -11,7 +11,6 @@ contract StakingManager is ReentrancyGuard, Ownable {
 
     struct UserInfo { 
         uint256 deposited;
-        uint256 rewardsAlreadyConsidered;
         uint256 autoCompounded;
         uint256 lastAutoCompounded;
     } //created user info structure
@@ -35,7 +34,7 @@ contract StakingManager is ReentrancyGuard, Ownable {
     event AddRewards(uint256 amount, uint256 lengthInDays);
     event Deposit(address indexed user, uint256 amount);
     event Withdraw(address indexed user, uint256 amount);
-    event ClaimReward(address indexed user, uint256 amount);
+    event Harvest(address indexed user, uint256 amount);
     event WithdrawALL(address indexed user, uint256 amount);
 
     constructor(address _Stakingtoken, address _Rewardtoken) {
@@ -51,13 +50,13 @@ contract StakingManager is ReentrancyGuard, Ownable {
         require(RewardToken.balanceOf(msg.sender) >= _Amount);
         require(
             block.timestamp > rewardPeriodEndTimestamp,
-            "cant stake before period finish"
+            "cant add rewards before period finish"
         );
         updateRewards();
         rewardPeriodEndTimestamp = block.timestamp.add(
             _lengthindays.mul(24 * 60 * 60) 
         );
-        rewardPerTOken = _Amount.mul(1e1).div(_lengthindays).div(24 * 60 * 60); //
+        rewardPerTOken = _Amount.mul(1e6).div(_lengthindays).div(24 * 60 * 60); //
         (
             RewardToken.transferFrom(msg.sender, address(this), _Amount),
             "transfer failed aprrove first  or you dont have enough token"
@@ -92,7 +91,7 @@ contract StakingManager is ReentrancyGuard, Ownable {
         ); // For everybody in the pool
 
         accumulatedRewardPerShare = accumulatedRewardPerShare.add(
-            totalNewReward.mul(1e6).div(totalStaked)
+            totalNewReward.mul(1e12).div(totalStaked)
         );
 
         lastRewardTimeStamp = block.timestamp;
@@ -104,30 +103,10 @@ contract StakingManager is ReentrancyGuard, Ownable {
     //deposit staking token
     function deposit(uint256 _amount) external nonReentrant {
         UserInfo storage user = users[msg.sender];
-        require(StakingToken.balanceOf(msg.sender) >= _amount);
+        require(StakingToken.balanceOf(msg.sender) >= _amount,"not enough token");
         updateRewards();
-
-        if (user.deposited > 0) {
-            uint256 pendingRewards = user
-                .deposited
-                .mul(accumulatedRewardPerShare)
-                .div(1e6)
-                .div(1e1)
-                .sub(user.rewardsAlreadyConsidered);
-            require(
-                RewardToken.transfer(msg.sender, pendingRewards),
-                "transfer failed"
-            );
-            emit ClaimReward(msg.sender, pendingRewards);
-        }
-
         user.deposited = user.deposited.add(_amount);
         totalStaked = totalStaked.add(_amount);
-        user.rewardsAlreadyConsidered = user
-            .deposited
-            .mul(accumulatedRewardPerShare)
-            .div(1e6)
-            .div(1e1);
         (
             StakingToken.transferFrom(msg.sender, address(this), _amount),
             "You dont have enough token"
@@ -142,21 +121,8 @@ contract StakingManager is ReentrancyGuard, Ownable {
             "you are withdrawing more than you deposited"
         );
         updateRewards();
-        uint256 pending = user
-            .deposited
-            .mul(accumulatedRewardPerShare)
-            .div(1e6)
-            .div(1e1)
-            .sub(user.rewardsAlreadyConsidered);
-        require(RewardToken.transfer(msg.sender, pending));
-        emit ClaimReward(msg.sender, pending);
         user.deposited = user.deposited.sub(_amount);
         totalStaked = totalStaked.sub(_amount);
-        user.rewardsAlreadyConsidered = user
-            .deposited
-            .mul(accumulatedRewardPerShare)
-            .div(1e6)
-            .div(1e1);
         StakingToken.transfer(msg.sender, _amount);
         emit Withdraw(msg.sender, _amount);
     }
@@ -168,44 +134,24 @@ contract StakingManager is ReentrancyGuard, Ownable {
             "you are withdrawing more than you deposited"
         );
         updateRewards();
-        uint256 pending = user
-            .deposited
-            .mul(accumulatedRewardPerShare)
-            .div(1e6)
-            .div(1e1)
-            .sub(user.rewardsAlreadyConsidered);
-        require(RewardToken.transfer(msg.sender, pending));
-        emit ClaimReward(msg.sender, pending);
+        RewardToken.transfer(msg.sender,user.autoCompounded);
+        emit Harvest(msg.sender,user.autoCompounded);
         totalStaked = totalStaked.sub(user.deposited);
-        user.rewardsAlreadyConsidered = user
-            .deposited
-            .mul(accumulatedRewardPerShare)
-            .div(1e6)
-            .div(1e1);
         StakingToken.transfer(msg.sender, user.deposited);
         emit WithdrawALL(msg.sender, user.deposited);
         user.deposited = 0;
+        user.autoCompounded = 0;
     }
-    //you can harvest  your token instead of autoCompound
-    function Harvest() external nonReentrant {
+    //you can harvest  all of your reward token instead of autoCompound
+    function HarvestToken() external nonReentrant {
         UserInfo storage user = users[msg.sender];
         if (user.deposited == 0) {
             return;
         }
         updateRewards();
-        uint256 pending = user
-            .deposited
-            .mul(accumulatedRewardPerShare)
-            .div(1e6)
-            .div(1e1)
-            .sub(user.rewardsAlreadyConsidered);
-        require(RewardToken.transfer(msg.sender, pending));
-        emit ClaimReward(msg.sender, pending);
-        user.rewardsAlreadyConsidered = user
-            .deposited
-            .mul(accumulatedRewardPerShare)
-            .div(1e6)
-            .div(1e1);
+        require(RewardToken.transfer(msg.sender, user.autoCompounded));
+        emit Harvest(msg.sender, user.autoCompounded);
+        user.autoCompounded = 0;
     }
     //you can autoCompund
        function autoCompound() external nonReentrant {
@@ -215,16 +161,13 @@ contract StakingManager is ReentrancyGuard, Ownable {
             return;
         }
         updateRewards();
-        uint256 pending = user
+        uint256 pending = user.autoCompounded.add(user
             .deposited
             .mul(accumulatedRewardPerShare)
-            .div(1e6)
-            .div(1e1)
-            .sub(user.rewardsAlreadyConsidered);
-      totalStaked = totalStaked.add(pending);
-      user.autoCompounded = user.autoCompounded + pending;
-      user.deposited = user.deposited.add(pending);
-      user.lastAutoCompounded = block.timestamp.add(8.mul(24*60));
+            .div(1e12)
+            .div(1e6));
+      user.autoCompounded = user.autoCompounded.add(pending);
+      user.lastAutoCompounded = block.timestamp.add(28800);
     }
     //shows your pending rewards
     function PendingRewards(address _user) public view returns (uint256) {
@@ -249,13 +192,11 @@ contract StakingManager is ReentrancyGuard, Ownable {
                 rewardPerTOken
             );
             accumulated = accumulated.add(
-                totalNewReward.mul(1e6).div(totalStaked)
+                totalNewReward.mul(1e12).div(totalStaked)
             );
         }
         return
-            user.deposited.mul(accumulated).div(1e6).div(1e1).sub(
-                user.rewardsAlreadyConsidered
-            );
+           user.autoCompounded.add(user.deposited.mul(accumulated).div(1e12).div(1e6));
     }
     //details for ui
     function getFrontendView()
@@ -271,7 +212,7 @@ contract StakingManager is ReentrancyGuard, Ownable {
     {
         if (block.timestamp <= rewardPeriodEndTimestamp) {
             _secondsleft = rewardPeriodEndTimestamp.sub(block.timestamp);
-            _rewardpersecond = rewardPerTOken.div(1e1);
+            _rewardpersecond = rewardPerTOken.div(1e6);
         }
         _deposited = users[msg.sender].deposited;
         _pending = PendingRewards(msg.sender);

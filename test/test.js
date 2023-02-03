@@ -1,126 +1,206 @@
-const {
-  time,
-  loadFixture,
-} = require("@nomicfoundation/hardhat-network-helpers");
-const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
-const { expect } = require("chai");
+const { expect } = require('chai')
+const { ethers } = require('hardhat')
 
-describe("Lock", function () {
-  // We define a fixture to reuse the same setup in every test.
-  // We use loadFixture to run this setup once, snapshot that state,
-  // and reset Hardhat Network to that snapshot in every test.
-  async function deployOneYearLockFixture() {
-    const ONE_YEAR_IN_SECS = 365 * 24 * 60 * 60;
-    const ONE_GWEI = 1_000_000_000;
+const toWei = (num) => ethers.utils.parseEther(num.toString())
+const fromWei = (num) => ethers.utils.formatEther(num)
 
-    const lockedAmount = ONE_GWEI;
-    const unlockTime = (await time.latest()) + ONE_YEAR_IN_SECS;
+describe('Staking', function () {
+  let owner, addr1, addr2, StakingManager, StakingToken, RewardToken
+  let secondsInDay = 24 * 60 * 60
+  let day = 30
 
-    // Contracts are deployed using the first signer/account by default
-    const [owner, otherAccount] = await ethers.getSigners();
+  beforeEach(async function () {
+    const stakingtoken = await ethers.getContractFactory('StakingToken')
+    const rewardtoken = await ethers.getContractFactory('RewardToken')
+    const stakingManager = await ethers.getContractFactory('StakingManager')
+    ;[owner, addr1, addr2] = await ethers.getSigners()
+    StakingToken = await stakingtoken.deploy()
+    RewardToken = await rewardtoken.deploy()
+    StakingManager = await stakingManager.deploy(
+      StakingToken.address,
+      RewardToken.address,
+    )
+  })
 
-    const Lock = await ethers.getContractFactory("Lock");
-    const lock = await Lock.deploy(unlockTime, { value: lockedAmount });
+  describe('checking', function () {
+    it('Should check check the owner of the contract & check staking , reward token address', async () => {
+      expect(await StakingToken.owner()).to.equal(owner.address)
+      expect(await RewardToken.owner()).to.equal(owner.address)
+      expect(await StakingManager.owner()).to.equal(owner.address)
+      expect(await StakingManager.StakingToken()).to.equal(StakingToken.address)
+      expect(await StakingManager.RewardToken()).to.equal(RewardToken.address)
+    })
 
-    return { lock, unlockTime, lockedAmount, owner, otherAccount };
-  }
+    it('should check adding reward correctly', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(300))
+      expect(
+        await RewardToken.allowance(owner.address, StakingManager.address),
+      ).to.equal(toWei(300))
 
-  describe("Deployment", function () {
-    it("Should set the right unlockTime", async function () {
-      const { lock, unlockTime } = await loadFixture(deployOneYearLockFixture);
+      await StakingManager.addRewards(toWei(300), day)
 
-      expect(await lock.unlockTime()).to.equal(unlockTime);
-    });
+      expect(await RewardToken.balanceOf(StakingManager.address)).to.equal(
+        toWei(300),
+      )
+    })
+    it('should fail adding reward because its only owner', async () => {
+      await RewardToken.transfer(addr1.address, toWei(300))
+      await RewardToken.connect(addr1).approve(
+        StakingManager.address,
+        toWei(300),
+      )
+      await expect(
+        StakingManager.connect(addr1).addRewards(toWei(300), day),
+      ).to.revertedWith('Ownable: caller is not the owner')
+    })
 
-    it("Should set the right owner", async function () {
-      const { lock, owner } = await loadFixture(deployOneYearLockFixture);
+    it('should fail adding reward before time ends', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(300))
+      expect(
+        await RewardToken.allowance(owner.address, StakingManager.address),
+      ).to.equal(toWei(300))
 
-      expect(await lock.owner()).to.equal(owner.address);
-    });
+      await StakingManager.addRewards(toWei(300), day)
 
-    it("Should receive and store the funds to lock", async function () {
-      const { lock, lockedAmount } = await loadFixture(
-        deployOneYearLockFixture
-      );
+      expect(await RewardToken.balanceOf(StakingManager.address)).to.equal(
+        toWei(300),
+      )
 
-      expect(await ethers.provider.getBalance(lock.address)).to.equal(
-        lockedAmount
-      );
-    });
+      await RewardToken.approve(StakingManager.address, toWei(300))
+      expect(
+        await RewardToken.allowance(owner.address, StakingManager.address),
+      ).to.equal(toWei(300))
 
-    it("Should fail if the unlockTime is not in the future", async function () {
-      // We don't use the fixture here because we want a different deployment
-      const latestTime = await time.latest();
-      const Lock = await ethers.getContractFactory("Lock");
-      await expect(Lock.deploy(latestTime, { value: 1 })).to.be.revertedWith(
-        "Unlock time should be in the future"
-      );
-    });
-  });
+      await expect(StakingManager.addRewards(toWei(300), day)).to.revertedWith(
+        'cant add rewards before period finish',
+      )
+    })
 
-  describe("Withdrawals", function () {
-    describe("Validations", function () {
-      it("Should revert with the right error if called too soon", async function () {
-        const { lock } = await loadFixture(deployOneYearLockFixture);
+    it('should  deposit token', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(1000))
+      await StakingManager.addRewards(toWei(1000), day)
+      await StakingToken.approve(StakingManager.address, toWei(300))
+      await StakingManager.deposit(toWei(300))
+      expect(await StakingManager.totalStaked()).to.equal(toWei(300))
+      const userInfo = await StakingManager.users(owner.address)
+      expect(userInfo.deposited).to.equal(toWei(300))
+    })
 
-        await expect(lock.withdraw()).to.be.revertedWith(
-          "You can't withdraw yet"
-        );
-      });
+    it('should  fail deposit token', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(1000))
 
-      it("Should revert with the right error if called from another account", async function () {
-        const { lock, unlockTime, otherAccount } = await loadFixture(
-          deployOneYearLockFixture
-        );
+      await StakingManager.addRewards(toWei(1000), day)
 
-        // We can increase the time in Hardhat Network
-        await time.increaseTo(unlockTime);
+      await StakingToken.connect(addr1).approve(
+        StakingManager.address,
+        toWei(300),
+      )
+      await expect(
+        StakingManager.connect(addr1).deposit(toWei(300)),
+      ).to.revertedWith('not enough token')
+    })
 
-        // We use lock.connect() to send a transaction from another account
-        await expect(lock.connect(otherAccount).withdraw()).to.be.revertedWith(
-          "You aren't the owner"
-        );
-      });
+    it('should withdraw', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(1000))
+      await StakingManager.addRewards(toWei(1000), day)
+      await StakingToken.transfer(addr1.address, toWei(300))
+      expect(await StakingToken.balanceOf(addr1.address)).to.equal(toWei(300))
+      await StakingToken.connect(addr1).approve(
+        StakingManager.address,
+        toWei(300),
+      )
+      await StakingManager.connect(addr1).deposit(toWei(300))
+      expect(await StakingToken.balanceOf(addr1.address)).to.equal(0)
+      await StakingManager.connect(addr1).withdraw(toWei(100))
+      expect(await StakingToken.balanceOf(addr1.address)).to.equal(toWei(100))
+      expect(await StakingManager.totalStaked()).to.equal(toWei(200))
+    })
+    it('should fail withdraw', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(1000))
+      await StakingManager.addRewards(toWei(1000), day)
+      await expect(
+        StakingManager.connect(addr1).withdraw(toWei(100)),
+      ).to.revertedWith('you are withdrawing more than you deposited')
+    })
+    it('should withdrawAll', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(1000))
+      await StakingManager.addRewards(toWei(1000), day)
+      await StakingToken.transfer(addr1.address, toWei(300))
+      await StakingToken.connect(addr1).approve(
+        StakingManager.address,
+        toWei(300),
+      )
 
-      it("Shouldn't fail if the unlockTime has arrived and the owner calls it", async function () {
-        const { lock, unlockTime } = await loadFixture(
-          deployOneYearLockFixture
-        );
+      await StakingManager.connect(addr1).deposit(toWei(300))
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      await StakingManager.connect(addr1).autoCompound()
+      const balance = await StakingManager.connect(addr1).users(addr1.address)
+      await StakingManager.connect(addr1).withdrawAll()
+      expect(await StakingToken.balanceOf(addr1.address)).to.equal(
+        balance.deposited,
+      )
+      expect(
+        await RewardToken.connect(addr1).balanceOf(addr1.address),
+      ).to.equal(balance.autoCompounded)
+    })
+    it('should autoCompound', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(1000))
+      await StakingManager.addRewards(toWei(1000), day)
+      await StakingToken.transfer(addr1.address, toWei(300))
+      await StakingToken.connect(addr1).approve(
+        StakingManager.address,
+        toWei(300),
+      )
+      await StakingManager.connect(addr1).deposit(toWei(300))
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      await StakingManager.connect(addr1).autoCompound()
+      const balance = await StakingManager.connect(addr1).users(addr1.address)
+      const frontEndView = await StakingManager.connect(addr1).getFrontendView()
+      expect(balance.autoCompounded).to.equal(frontEndView._autoCompounded)
+    })
 
-        // Transactions are sent using the first signer by default
-        await time.increaseTo(unlockTime);
+    it('should faile auto compound need to wait for 8 hours', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(1000))
+      await StakingManager.addRewards(toWei(1000), day)
+      await StakingToken.transfer(addr1.address, toWei(300))
+      await StakingToken.connect(addr1).approve(
+        StakingManager.address,
+        toWei(300),
+      )
+      await StakingManager.connect(addr1).deposit(toWei(300))
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      await StakingManager.connect(addr1).autoCompound()
+      await expect(
+        StakingManager.connect(addr1).autoCompound(),
+      ).to.revertedWith('you cant autoCompound now wait for the cooldown')
+    })
+    it('should harvest reward token', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(1000))
+      await StakingManager.addRewards(toWei(1000), day)
+      await StakingToken.transfer(addr1.address, toWei(300))
+      await StakingToken.connect(addr1).approve(
+        StakingManager.address,
+        toWei(300),
+      )
+      await StakingManager.connect(addr1).deposit(toWei(300))
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      await StakingManager.connect(addr1).autoCompound()
+      const balance = await StakingManager.connect(addr1).users(addr1.address)
+      await StakingManager.connect(addr1).HarvestToken()
+      expect(await RewardToken.balanceOf(addr1.address)).to.equal(
+        balance.autoCompounded,
+      )
+    })
+    it('should fail withdraw remaining reward token because pool is still active', async () => {
+      await RewardToken.approve(StakingManager.address, toWei(300))
+      expect(
+        await RewardToken.allowance(owner.address, StakingManager.address),
+      ).to.equal(toWei(300))
 
-        await expect(lock.withdraw()).not.to.be.reverted;
-      });
-    });
-
-    describe("Events", function () {
-      it("Should emit an event on withdrawals", async function () {
-        const { lock, unlockTime, lockedAmount } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw())
-          .to.emit(lock, "Withdrawal")
-          .withArgs(lockedAmount, anyValue); // We accept any value as `when` arg
-      });
-    });
-
-    describe("Transfers", function () {
-      it("Should transfer the funds to the owner", async function () {
-        const { lock, unlockTime, lockedAmount, owner } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw()).to.changeEtherBalances(
-          [owner, lock],
-          [lockedAmount, -lockedAmount]
-        );
-      });
-    });
-  });
-});
+      await StakingManager.addRewards(toWei(300), day)
+      await expect(StakingManager.withdrawRemainingToken()).to.revertedWith(
+        'withdraw after pool reached its time',
+      )
+    })
+  })
+})
